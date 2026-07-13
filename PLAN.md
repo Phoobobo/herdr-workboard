@@ -70,6 +70,54 @@ real guardian once intents land.
   by `init` into the board tab (small ratio) or a dedicated last tab.
 - Board doc additions: `max_running`, `dispatch: on|off`, `notify: on|off`.
 
+## Usability: choosable agents + "just add todos" dispatch
+
+Constraints: keep the one-human-plus-agents model; every feature must be
+holdable in one sentence.
+
+### Choosable coding agent
+
+- **Auto-detect, don't configure**: probe PATH for agents herdr can track
+  (claude, codex, hermes, opencode, droid, cursor-agent, …). Zero config by
+  default.
+- Three levels: user default (`<state-dir>/config.json`), board override
+  (`agent_cmd`, exists), per-task pick at start time.
+- `s` stays instant (board default). `a` becomes a picker over detected agents
+  (digit picks, Enter keeps, `e` hand-edits argv).
+- **Warn when the chosen agent has no herdr detection/integration** — status
+  stays `unknown`, so auto-sync and dispatch can't see it. Flash this at
+  session start; it is the main hidden failure mode.
+
+### Dispatcher = "auto-press `s`"
+
+One rule: while `dispatch` is on and `doing` holds fewer than `max_running`
+cards, start the default agent on the TOP card of `todo`.
+
+- Top-down from `todo` only; `J`/`K` reorder is the priority UI. No ready
+  state, no claims.
+- Off by default; `d` toggles per board; header shows `▶ dispatch · 1/2 slots`;
+  `max_running` defaults to 1.
+- `done → review` stays the human gate — no automatic verification; the
+  product promise is "finished work arrives for review", not "work is merged".
+- Notifications ship WITH dispatch: `notification.show` on done ("#7 ready for
+  review") and blocked (sound `request`) — this is what makes walking away safe.
+- v0.2 ships the dispatcher inside the TUI event loop (works while a board
+  pane is open); the v0.3 guardian only relocates it headless.
+
+### Prompt quality is the real lever
+
+- `E` on a card edits a multi-line task body; title = card, body = prompt meat.
+- Per-board prompt template (`{title}`/`{body}`) so boards can prepend house
+  rules, e.g. "work autonomously; print a 3-line summary when finished; if you
+  need a human decision, say BLOCKED and why" — which also produces clean
+  done/blocked signals for sync + notifications.
+
+### Deliberately not adding
+
+Priorities, tenants, dependencies/subtasks, comments, multi-board UI,
+retry/backoff machinery. Column order + task bodies + the review gate cover
+these at this scale; revisit only on real pain.
+
 ### Open questions
 
 - Dispatcher prompt contract: what does an auto-started agent get beyond
@@ -80,12 +128,17 @@ real guardian once intents land.
 
 ## Milestones
 
-- **v0.1 — shipped**: TUI, sessions, idle-pane reuse, auto-sync. Publish to
+- **v0.1 — shipped**: TUI, sessions, idle-pane reuse, auto-sync. Published to
   GitHub with the `herdr-plugin` topic (installable via
   `herdr plugin install Phoobobo/herdr-workboard`).
-- **v0.2 — single-writer discipline**: lock file + leader election among board
-  panes; intents file; TUIs stop racing on the JSON.
-- **v0.3 — guardian pane**: `src/guardian.ts` + `guard` entrypoint owning
-  sync/dispatch/notifications; TUI becomes a pure view/controller.
-- **v0.4 — dispatcher features**: WIP limits, retry caps, scheduled tasks,
+- **v0.2 — agents + prompts**: agent auto-detection and `a` picker (user
+  default / board override / per-task pick); undetectable-agent warning; task
+  body editing (`E`); per-board prompt template.
+- **v0.3 — dispatch in the TUI**: `d` toggle, `max_running` (default 1),
+  top-of-todo auto-start, done/blocked notifications; lock file + leader
+  election so overlapping board panes stop racing on the JSON.
+- **v0.4 — guardian pane**: `src/guardian.ts` + `guard` entrypoint takes over
+  sync/dispatch/notifications headless (intents file, single writer); TUI
+  becomes a pure view/controller.
+- **v0.5 — dispatcher extras, on demand**: retry caps, scheduled tasks,
   done-column auto-archive.
