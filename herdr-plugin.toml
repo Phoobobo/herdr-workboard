@@ -1,0 +1,24 @@
+id = "phoobobo.workboard"
+name = "Workboard"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Kanban workboard for herdr: boards are workspaces, task states are tabs, task sessions are panes"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "init"
+title = "Workboard: create board for this project"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "init"]
+
+[[actions]]
+id = "open"
+title = "Workboard: open board"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "open"]
+
+[[panes]]
+id = "board"
+title = "workboard"
+placement = "overlay"
+command = ["bun", "run", "src/board.ts"]
