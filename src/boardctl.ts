@@ -4,7 +4,7 @@
 // Moving a card between states physically moves its pane between tabs.
 
 import { HerdrApiError, request } from "./herdr.ts";
-import { newId, saveBoard } from "./store.ts";
+import { loadConfig, newId, saveBoard } from "./store.ts";
 import type { AgentStatus, Board, BoardState, PaneInfo, PaneMoveResult, TabInfo, Task, WorkspaceInfo } from "./types.ts";
 
 export const DEFAULT_STATES = ["todo", "doing", "review", "done"];
@@ -13,6 +13,13 @@ export const BOARD_TAB_LABEL = "board";
 export const BOARD_PANE_LABEL = "workboard";
 
 export function makeBoard(name: string, cwd: string, workspaceId: string): Board {
+  let defaultCmd = [...DEFAULT_AGENT_CMD];
+  try {
+    const cfg = loadConfig();
+    if (cfg.default_cmd?.length) defaultCmd = [...cfg.default_cmd];
+  } catch {
+    // unreadable config falls back to the built-in default
+  }
   return {
     version: 1,
     id: newId("b"),
@@ -20,7 +27,7 @@ export function makeBoard(name: string, cwd: string, workspaceId: string): Board
     cwd,
     workspace_id: workspaceId,
     board_pane_id: null,
-    agent_cmd: [...DEFAULT_AGENT_CMD],
+    agent_cmd: defaultCmd,
     states: DEFAULT_STATES.map((n, i) => ({ id: `s${i + 1}`, name: n, tab_id: null })),
     tasks: [],
     next_seq: 1,
@@ -197,6 +204,22 @@ function sessionEnv(board: Board, task: Task): Record<string, string> {
   return { WORKBOARD_BOARD_ID: board.id, WORKBOARD_TASK_ID: task.id };
 }
 
+export const DEFAULT_PROMPT_TEMPLATE = "{title}\n\n{body}";
+
+/** The agent argv for a task: per-task override, else the board default. */
+export function taskAgentCmd(board: Board, task: Task): string[] {
+  return task.agent_cmd?.length ? task.agent_cmd : board.agent_cmd;
+}
+
+/** Fill the board's prompt template with the task's title and body. */
+export function buildPrompt(board: Board, task: Task): string {
+  const template = board.prompt_template?.trim() ? board.prompt_template : DEFAULT_PROMPT_TEMPLATE;
+  // Single pass with a function replacement: string replacements would expand
+  // $-patterns ($&, $') from task text, and sequential passes would
+  // re-substitute a "{body}" occurring inside the title.
+  return template.replace(/\{title\}|\{body\}/g, (m) => (m === "{title}" ? task.title : task.body ?? "")).trim();
+}
+
 /**
  * Which column an agent status maps to, by state name with positional
  * fallbacks: working → doing-like (else 2nd column), done → review-like
@@ -240,7 +263,8 @@ export async function startSession(board: Board, task: Task, kind: "agent" | "sh
   if (!state) throw new Error(`task ${task.id} has unknown state`);
   const tabId = await ensureStateTab(board, state);
   const env = sessionEnv(board, task);
-  const prompt = task.body ? `${task.title}\n\n${task.body}` : task.title;
+  const agentCmd = taskAgentCmd(board, task);
+  const prompt = buildPrompt(board, task);
 
   const idle = await findIdlePane(board, tabId);
   let pane: PaneInfo;
@@ -252,7 +276,7 @@ export async function startSession(board: Board, task: Task, kind: "agent" | "sh
       const assigns = Object.entries(env)
         .map(([k, v]) => `${k}=${shQuote(v)}`)
         .join(" ");
-      const argv = [...board.agent_cmd, prompt].map(shQuote).join(" ");
+      const argv = [...agentCmd, prompt].map(shQuote).join(" ");
       // leading space keeps the line out of shell history
       await request("pane.send_input", { pane_id: pane.pane_id, text: ` ${cd}${assigns} exec ${argv}`, keys: ["Enter"] });
     } else if (cd) {
@@ -261,7 +285,7 @@ export async function startSession(board: Board, task: Task, kind: "agent" | "sh
   } else if (kind === "agent") {
     const res = await request<{ agent: PaneInfo }>("agent.start", {
       name: `wb-${task.seq}-${Date.now().toString(36)}`,
-      argv: [...board.agent_cmd, prompt],
+      argv: [...agentCmd, prompt],
       cwd: board.cwd,
       tab_id: tabId,
       focus: false,

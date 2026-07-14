@@ -79,12 +79,15 @@ description = "open workboard"
 | `↑/↓` `j/k` | select card |
 | `n` | new task in selected column |
 | `Enter` | jump to the task's session pane |
-| `s` | start an **agent** session (default `claude`, task title+body as the prompt) |
+| `s` | start an **agent** session with the board's agent |
+| `o` | start a session with a **chosen** agent (per-task pick) |
 | `S` | start a plain **shell** session |
 | `[` / `]` (or `H`/`L`) | move card left / right — moves its pane between tabs |
 | `J` / `K` | reorder card within its column |
 | `e` | edit task title |
-| `a` | set the agent command for this board |
+| `E` | edit task **body** in `$EDITOR` (flows into the agent prompt) |
+| `a` | choose the board's agent (`d` in the picker: also make it your default) |
+| `P` | edit the board's prompt template (`{title}` / `{body}`) |
 | `A` | toggle auto-sync (columns follow agent state) |
 | `R` | rename board (and its workspace) |
 | `x` | archive card (asks whether to close its session pane) |
@@ -115,6 +118,44 @@ labeled `#<n> <title>` and its detected agent status
 (`idle / working / blocked / done`) is shown live on the card. Archiving a
 card offers to close its pane; closing the pane by hand simply clears the
 card's session.
+
+## Choosing agents
+
+The board probes your PATH for agent CLIs it knows how to launch (claude,
+codex, hermes, opencode, copilot, cursor-agent, droid, kimi, kilo, qoder,
+gemini, pi, omp) — no configuration needed. Three levels:
+
+- **your default** — in the `a` picker, press `d` on an agent to make it the
+  default for every *new* board (stored in the plugin state dir's
+  `config.json`)
+- **board agent** — `a` picks per board; `s` always starts this one
+- **per task** — `o` picks an agent for just that card and starts the session;
+  the choice sticks to the card for restarts
+
+Each entry shows the exact launch argv (e.g. `hermes -z <task>`); pick
+`custom…` to hand-edit the argv for anything unlisted. If you pick an agent
+herdr has no detection manifest for, the board warns you: its status will stay
+`unknown`, so status badges and auto-sync can't follow it.
+
+## Task bodies and the prompt
+
+`E` opens the task body in `$VISUAL`/`$EDITOR` (falls back to `vi`) — the TUI
+hands over the terminal and takes it back on exit; cards with a body show a
+`≡` marker. The session prompt is built from the board's template (`P` to
+edit, same editor flow):
+
+```
+{title}
+
+{body}
+
+Work autonomously. If you need a human decision, say BLOCKED and why.
+```
+
+The default template is just `{title}\n\n{body}`; house rules like the last
+line above are how you teach agents to produce clean `done`/`blocked` signals
+for auto-sync and notifications. Use a terminal editor — GUI editors that
+return before the file is saved won't work.
 
 ## Auto-sync: columns follow the agent
 

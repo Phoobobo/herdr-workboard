@@ -5,9 +5,12 @@
 // subscription to herdr and re-reconciles on every relevant event.
 
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { HerdrApiError, request, subscribe, type EventStream } from "./herdr.ts";
 import * as store from "./store.ts";
 import * as ctl from "./boardctl.ts";
+import { detectAgents, manifestIdFor, agentLabel, type DetectedAgent } from "./agents.ts";
 import { SGR, Screen, truncate, strWidth, InputParser, fmtAge, type InputEvent } from "./ui.ts";
 import type { AgentStatus, Board, PaneInfo, Task } from "./types.ts";
 
@@ -19,6 +22,7 @@ type Mode =
   | { type: "normal" }
   | { type: "input"; label: string; value: string; onSubmit: (v: string) => void }
   | { type: "confirm"; msg: string; onYes: () => void; onNo?: () => void }
+  | { type: "pick"; title: string; options: Array<{ label: string; hint?: string }>; sel: number; footer: string; onPick: (idx: number, alt: boolean) => void }
   | { type: "help" }
   | { type: "noboard" };
 
@@ -135,7 +139,11 @@ function taskPane(task: Task): PaneInfo | null {
 }
 
 function run(op: () => Promise<void>): void {
-  if (busy) return;
+  if (busy) {
+    setFlash("another operation is running — retry in a moment", true);
+    draw();
+    return;
+  }
   busy = true;
   draw();
   op()
@@ -161,6 +169,9 @@ let refreshing = false;
 let refreshQueued = false;
 
 // ---- auto-sync: columns follow the agent session state machine ----
+
+let trackableAgents: Set<string> | null = null; // herdr detection manifest ids
+let agents: DetectedAgent[] = []; // agent CLIs found on PATH
 
 const statusPrev = new Map<string, AgentStatus>(); // pane_id -> last seen status
 const syncInFlight = new Set<string>(); // task ids with an auto-move running
@@ -231,7 +242,7 @@ async function refresh(): Promise<void> {
     // Reload from disk (the init/open actions write the same file) — but not
     // while an op, auto-sync move, or modal holds references into the current
     // board object.
-    const modal = mode.type === "input" || mode.type === "confirm";
+    const modal = mode.type === "input" || mode.type === "confirm" || mode.type === "pick";
     if (!busy && !modal && syncInFlight.size === 0) {
       const fresh = store.loadBoard(board.id);
       if (fresh) board = fresh;
@@ -368,6 +379,7 @@ function draw(): void {
     drawBoard(scr);
   }
   if (mode.type === "help") drawHelp(scr);
+  if (mode.type === "pick") drawPick(scr, mode);
   drawFooter(scr);
   out(scr.render());
 }
@@ -456,9 +468,9 @@ function drawCard(scr: Screen, task: Task, x: number, y: number, w: number, col:
   const inner = w - 4;
   scr.text(x + 2, y + 1, truncate(task.title, inner), (selected ? SGR.bold + SGR.text : SGR.text) + (dragged ? SGR.faint : ""));
 
-  // meta row: #id · status ......... age
+  // meta row: #id (≡ = has body) · status ......... age
   let mx = x + 2;
-  mx += scr.text(mx, y + 2, `#${task.seq}`, SGR.faint, inner);
+  mx += scr.text(mx, y + 2, `#${task.seq}${task.body ? "≡" : ""}`, SGR.faint, inner);
   mx += 1;
   if (pane) {
     const { glyph, style } = statusGlyph(pane.agent_status);
@@ -481,10 +493,12 @@ function drawHelp(scr: Screen): void {
     ["n", "new task in column"],
     ["enter", "open session pane"],
     ["s / S", "start agent / shell session"],
+    ["o", "start session with a chosen agent"],
     ["[ / ]", "move card left / right (moves pane between tabs)"],
     ["J / K", "reorder card within column"],
-    ["e", "edit title"],
-    ["a", "set agent command"],
+    ["e / E", "edit title / edit body in $EDITOR"],
+    ["a", "choose board agent (d in picker: my default)"],
+    ["P", "edit prompt template ({title}/{body})"],
     ["A", "toggle auto-sync (columns follow agent state)"],
     ["R", "rename board"],
     ["x", "archive card"],
@@ -504,6 +518,36 @@ function drawHelp(scr: Screen): void {
     scr.text(x + 3, y + 3 + i, k, SGR.amber);
     scr.text(x + 13, y + 3 + i, desc, SGR.text, w - 15);
   });
+}
+
+function drawPick(scr: Screen, m: Extract<Mode, { type: "pick" }>): void {
+  const w = Math.min(scr.w - 4, 56);
+  // window the options around the selection when the pane is short
+  const maxShown = Math.max(1, Math.min(m.options.length, scr.h - 7));
+  let first = 0;
+  if (m.options.length > maxShown) {
+    first = Math.min(Math.max(0, m.sel - Math.floor(maxShown / 2)), m.options.length - maxShown);
+  }
+  const h = maxShown + 5;
+  const x = Math.floor((scr.w - w) / 2);
+  const y = Math.max(0, Math.floor((scr.h - h) / 2));
+  scr.fill(x, y, w, h, " ", "");
+  scr.box(x, y, w, h, SGR.accent);
+  scr.text(x + 2, y + 1, m.title, SGR.accentBold, w - 4);
+  if (first > 0) scr.text(x + w - 3, y + 2, "↑", SGR.dim);
+  for (let i = first; i < first + maxShown; i++) {
+    const opt = m.options[i];
+    const sel = i === m.sel;
+    const row = y + 3 + (i - first);
+    if (sel) scr.fill(x + 1, row, w - 2, 1, " ", SGR.headerBg);
+    const base = sel ? SGR.headerBg : "";
+    let cx = x + 2;
+    cx += scr.text(cx, row, `${i + 1} `, base + SGR.amber);
+    cx += scr.text(cx, row, opt.label, base + (sel ? SGR.bold + SGR.text : SGR.text), Math.min(18, w - 6));
+    if (opt.hint) scr.text(x + 22, row, truncate(opt.hint, w - 24), base + SGR.dim);
+  }
+  if (first + maxShown < m.options.length) scr.text(x + w - 3, y + h - 2, "↓", SGR.dim);
+  scr.text(x + 2, y + h - 1, ` ${m.footer} `, SGR.faint, w - 4);
 }
 
 function drawFooter(scr: Screen): void {
@@ -528,8 +572,166 @@ function drawFooter(scr: Screen): void {
   const hints =
     mode.type === "noboard"
       ? "c create board · q quit"
-      : "n new · ⏎ open · s/S session · [ ] move · e edit · x archive · r refresh · ? help · q quit";
+      : "n new · ⏎ open · s/S/o session · [ ] move · e/E edit · x archive · ? help · q quit";
   scr.text(1, y, (busy ? "⏳ " : "") + hints, SGR.dim, scr.w - 2);
+}
+
+// ---- external editor (task bodies, prompt template) ----
+
+/**
+ * Open $VISUAL/$EDITOR on a temp file, blocking the TUI. The terminal is
+ * handed to the editor wholesale (leave alt screen, cooked mode) and restored
+ * afterwards. Returns the edited text, or null when the editor failed.
+ */
+let discardPendingInput = false;
+
+function editInEditor(initial: string): string | null {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "workboard-"));
+  const file = path.join(dir, "edit.md");
+  let text: string | null = null;
+  try {
+    fs.writeFileSync(file, initial);
+    out("\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+    process.stdin.setRawMode?.(false);
+    process.stdin.pause();
+    const editor = (process.env.VISUAL || process.env.EDITOR || "vi").split(/\s+/).filter(Boolean);
+    try {
+      // Don't gate on exit code: macOS vim exits 1 after a clean :wq. The
+      // saved file is the truth; only a failed spawn/read means failure.
+      Bun.spawnSync([...editor, file], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      text = null;
+    }
+    process.stdin.resume();
+    process.stdin.setRawMode?.(true);
+    out("\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // keystrokes parsed from the same chunk as the key that opened the editor
+  // must not replay as board commands now that the screen changed under them
+  discardPendingInput = true;
+  draw();
+  return text;
+}
+
+function editBody(): void {
+  if (!board) return;
+  const taskRef = selectedTask();
+  if (!taskRef) return;
+  const taskId = taskRef.id;
+  const text = editInEditor(taskRef.body ?? "");
+  if (text === null) {
+    setFlash("editor failed — set $EDITOR to a terminal editor", true);
+    return;
+  }
+  const task = liveTask(taskId);
+  if (!task || !board) return;
+  const body = text.trimEnd();
+  task.body = body || undefined;
+  task.updated_at = Date.now();
+  store.saveBoard(board);
+  setFlash(body ? `#${task.seq} body updated (${body.length} chars)` : `#${task.seq} body cleared`);
+  draw();
+}
+
+function editPromptTemplate(): void {
+  if (!board) return;
+  const text = editInEditor(board.prompt_template ?? ctl.DEFAULT_PROMPT_TEMPLATE);
+  if (text === null) {
+    setFlash("editor failed — set $EDITOR to a terminal editor", true);
+    return;
+  }
+  const template = text.trim();
+  board.prompt_template = template && template !== ctl.DEFAULT_PROMPT_TEMPLATE ? template : undefined;
+  store.saveBoard(board);
+  setFlash(board.prompt_template ? "prompt template updated ({title}/{body})" : "prompt template reset to default");
+  draw();
+}
+
+// ---- agent picking ----
+
+function warnIfUntrackable(argv: string[]): boolean {
+  if (!trackableAgents) return false;
+  const id = manifestIdFor(argv);
+  if (trackableAgents.has(id)) return false;
+  setFlash(`⚠ herdr may not track '${agentLabel(argv)}' — status stays unknown; auto-sync won't follow it`, true, 5000);
+  return true;
+}
+
+function customArgvInput(current: string[], apply: (argv: string[]) => void): void {
+  mode = {
+    type: "input",
+    label: "agent command (prompt appended as last arg)",
+    value: current.join(" "),
+    onSubmit: (v) => {
+      const argv = v.trim().split(/\s+/).filter(Boolean);
+      if (argv.length === 0) return;
+      apply(argv);
+    },
+  };
+  draw();
+}
+
+/** Shared agent picker: detected agents + a custom-argv escape hatch. */
+function pickAgent(title: string, footer: string, current: string[], apply: (argv: string[], alt: boolean) => void): void {
+  const options = agents.map((a) => ({
+    label: `${a.id}${a.cmd.join(" ") === current.join(" ") ? "  ●" : ""}`,
+    hint: [...a.cmd, "<task>"].join(" "),
+  }));
+  options.push({ label: "custom…", hint: "edit the argv by hand" });
+  const sel = Math.max(0, agents.findIndex((a) => a.cmd.join(" ") === current.join(" ")));
+  mode = {
+    type: "pick",
+    title,
+    options,
+    sel,
+    footer,
+    onPick: (idx, alt) => {
+      if (idx >= agents.length) {
+        customArgvInput(current, (argv) => apply(argv, alt));
+        return;
+      }
+      apply(agents[idx].cmd, alt);
+    },
+  };
+  draw();
+}
+
+function pickBoardAgent(): void {
+  if (!board) return;
+  pickAgent("board agent — sessions started with s", "⏎ set for board · d also make my default · esc", board.agent_cmd, (argv, alt) => {
+    if (!board) return;
+    board.agent_cmd = argv;
+    store.saveBoard(board);
+    if (alt) {
+      store.saveConfig({ ...store.loadConfig(), default_cmd: argv });
+    }
+    if (!warnIfUntrackable(argv)) {
+      setFlash(`board agent: ${agentLabel(argv)}${alt ? " (saved as your default for new boards)" : ""}`);
+    }
+    draw();
+  });
+}
+
+function pickTaskAgentAndStart(): void {
+  if (!board) return;
+  const taskRef = selectedTask();
+  if (!taskRef) return;
+  if (taskRef.pane_id && taskPane(taskRef)) {
+    setFlash("session already running — press ⏎ to open");
+    draw();
+    return;
+  }
+  const taskId = taskRef.id;
+  pickAgent(`start #${taskRef.seq} with…`, "⏎ start session · esc", ctl.taskAgentCmd(board, taskRef), (argv) => {
+    const task = liveTask(taskId);
+    if (!task || !board) return;
+    task.agent_cmd = argv;
+    store.saveBoard(board);
+    startSelectedTask(taskId);
+  });
 }
 
 // ---- actions from the UI ----
@@ -644,14 +846,20 @@ function startSelected(kind: "agent" | "shell"): void {
     draw();
     return;
   }
-  const taskId = taskRef.id;
+  startSelectedTask(taskRef.id, kind);
+}
+
+function startSelectedTask(taskId: string, kind: "agent" | "shell" = "agent"): void {
   run(async () => {
     const task = liveTask(taskId);
     if (!task) throw new Error("task no longer exists");
+    const argv = ctl.taskAgentCmd(board!, task);
     const pane = await ctl.startSession(board!, task, kind);
     statusPrev.set(pane.pane_id, pane.agent_status);
     const st = board!.states.find((s) => s.id === task.state_id);
-    setFlash(`${kind} session started in '${st?.name}' — ⏎ to open`);
+    if (!(kind === "agent" && warnIfUntrackable(argv))) {
+      setFlash(`${kind === "agent" ? agentLabel(argv) : "shell"} session started in '${st?.name}' — ⏎ to open`);
+    }
     selCol = Math.max(0, stateIdx(task.state_id));
     selRow = Math.max(0, tasksInCol(selCol).indexOf(task));
     ensureSelVisible();
@@ -716,22 +924,6 @@ function editTitle(): void {
   draw();
 }
 
-function editAgentCmd(): void {
-  if (!board) return;
-  mode = {
-    type: "input",
-    label: "agent command",
-    value: board.agent_cmd.join(" "),
-    onSubmit: (v) => {
-      const argv = v.trim().split(/\s+/).filter(Boolean);
-      if (argv.length === 0 || !board) return;
-      board.agent_cmd = argv;
-      store.saveBoard(board);
-      setFlash(`sessions will run: ${argv.join(" ")} "<task>"`);
-    },
-  };
-  draw();
-}
 
 function renameBoard(): void {
   if (!board) return;
@@ -794,6 +986,39 @@ function handleEvent(ev: InputEvent): void {
     return;
   }
 
+  if (mode.type === "pick") {
+    const m = mode;
+    if (ev.type === "key") {
+      if (ev.name === "up") m.sel = Math.max(0, m.sel - 1);
+      else if (ev.name === "down") m.sel = Math.min(m.options.length - 1, m.sel + 1);
+      else if (ev.name === "esc") mode = { type: "normal" };
+      else if (ev.name === "enter") {
+        mode = { type: "normal" };
+        m.onPick(m.sel, false);
+        return;
+      }
+      draw();
+    } else if (ev.type === "char") {
+      if (ev.ch === "k") m.sel = Math.max(0, m.sel - 1);
+      else if (ev.ch === "j") m.sel = Math.min(m.options.length - 1, m.sel + 1);
+      else if (ev.ch === "q") mode = { type: "normal" };
+      else if (ev.ch === "d") {
+        mode = { type: "normal" };
+        m.onPick(m.sel, true);
+        return;
+      } else if (ev.ch >= "1" && ev.ch <= "9") {
+        const idx = ev.ch.charCodeAt(0) - 49;
+        if (idx < m.options.length) {
+          mode = { type: "normal" };
+          m.onPick(idx, false);
+          return;
+        }
+      }
+      draw();
+    }
+    return;
+  }
+
   if (mode.type === "confirm") {
     const m = mode;
     if (ev.type === "char" && (ev.ch === "y" || ev.ch === "Y")) {
@@ -850,7 +1075,10 @@ function handleEvent(ev: InputEvent): void {
     case "s": startSelected("agent"); break;
     case "S": startSelected("shell"); break;
     case "e": editTitle(); break;
-    case "a": editAgentCmd(); break;
+    case "E": editBody(); break;
+    case "P": editPromptTemplate(); break;
+    case "o": pickTaskAgentAndStart(); break;
+    case "a": pickBoardAgent(); break;
     case "A":
       if (board) {
         board.auto_sync = !autoSyncEnabled();
@@ -970,7 +1198,13 @@ async function main(): Promise<void> {
   const parser = new InputParser();
   let escTimer: ReturnType<typeof setTimeout> | null = null;
   process.stdin.on("data", (data: string) => {
-    for (const ev of parser.feed(data.toString())) handleEvent(ev);
+    for (const ev of parser.feed(data.toString())) {
+      handleEvent(ev);
+      if (discardPendingInput) {
+        discardPendingInput = false;
+        break;
+      }
+    }
     if (escTimer) {
       clearTimeout(escTimer);
       escTimer = null;
@@ -983,6 +1217,15 @@ async function main(): Promise<void> {
     }
   });
   process.stdin.on("end", () => process.exit(0));
+
+  agents = detectAgents();
+  request<{ manifests?: Array<{ agent: string }> }>("server.agent_manifests", {})
+    .then((res) => {
+      trackableAgents = new Set((res.manifests ?? []).map((m) => m.agent));
+    })
+    .catch(() => {
+      trackableAgents = null; // older server — skip trackability warnings
+    });
 
   board = resolveBoard();
   if (!board) {
@@ -1008,7 +1251,7 @@ async function main(): Promise<void> {
   }
 
   setInterval(() => {
-    if (!busy && mode.type !== "input" && mode.type !== "confirm") scheduleRefresh(0);
+    if (!busy && mode.type !== "input" && mode.type !== "confirm" && mode.type !== "pick") scheduleRefresh(0);
   }, 4000);
 }
 

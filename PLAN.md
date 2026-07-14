@@ -131,9 +131,10 @@ these at this scale; revisit only on real pain.
 - **v0.1 — shipped**: TUI, sessions, idle-pane reuse, auto-sync. Published to
   GitHub with the `herdr-plugin` topic (installable via
   `herdr plugin install Phoobobo/herdr-workboard`).
-- **v0.2 — agents + prompts**: agent auto-detection and `a` picker (user
-  default / board override / per-task pick); undetectable-agent warning; task
-  body editing (`E`); per-board prompt template.
+- **v0.2 — agents + prompts — shipped**: agent auto-detection (`src/agents.ts`)
+  and `a` picker (user default via `d` / board override / per-task pick with
+  `o`); undetectable-agent warning from `server.agent_manifests`; task body
+  editing (`E`, `$EDITOR` handoff); per-board prompt template (`P`).
 - **v0.3 — dispatch in the TUI**: `d` toggle, `max_running` (default 1),
   top-of-todo auto-start, done/blocked notifications; lock file + leader
   election so overlapping board panes stop racing on the JSON.

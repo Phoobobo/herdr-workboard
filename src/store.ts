@@ -23,6 +23,7 @@ export function stateDir(): string {
 
 const boardsDir = () => path.join(stateDir(), "boards");
 const bindingsPath = () => path.join(stateDir(), "bindings.json");
+const configPath = () => path.join(stateDir(), "config.json");
 
 export function ensureDirs(): void {
   fs.mkdirSync(boardsDir(), { recursive: true });
@@ -123,6 +124,30 @@ export function resolveBoardForWorkspace(workspaceId: string): Board | null {
     if (b.workspace_id === workspaceId) return b;
   }
   return null;
+}
+
+export interface UserConfig {
+  default_cmd?: string[]; // default agent argv for NEW boards (prompt appended)
+}
+
+export function loadConfig(): UserConfig {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(configPath(), "utf8");
+  } catch (err) {
+    if (isEnoent(err)) return {};
+    throw err;
+  }
+  try {
+    return JSON.parse(raw) as UserConfig;
+  } catch {
+    return {};
+  }
+}
+
+export function saveConfig(config: UserConfig): void {
+  ensureDirs();
+  writeAtomic(configPath(), JSON.stringify(config, null, 2) + "\n");
 }
 
 export function findBoardByCwd(cwd: string): Board | null {
