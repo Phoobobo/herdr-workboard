@@ -135,6 +135,19 @@ these at this scale; revisit only on real pain.
   and `a` picker (user default via `d` / board override / per-task pick with
   `o`); undetectable-agent warning from `server.agent_manifests`; task body
   editing (`E`, `$EDITOR` handoff); per-board prompt template (`P`).
+- **v0.2.1 — session/move UX polish — shipped**: sessions and moves reuse an
+  idle pane already sitting in the destination tab before creating a new one;
+  when none is reusable, the newcomer lands via a largest-pane +
+  aspect-corrected split so repeated arrivals tile a tab into an even grid
+  (verified: 4 sequential arrivals into an empty tab produced 4 equal panes,
+  and the same algorithm gives a true 2×2 on a typical terminal shape) instead
+  of a lopsided stack, and a leftover idle pane in an otherwise-busy tab is
+  closed by the next arrival rather than left to accumulate; manually moving a
+  session-less card into the working column now also starts its preferred
+  agent there (mirrors the existing working→doing direction, so the two
+  directions of "doing = working" are now symmetric); the board's status bar
+  (row 2) shows the preferred agent, auto-sync state, and the selected card's
+  per-task override when it differs.
 - **v0.3 — dispatch in the TUI**: `d` toggle, `max_running` (default 1),
   top-of-todo auto-start, done/blocked notifications; lock file + leader
   election so overlapping board panes stop racing on the JSON.

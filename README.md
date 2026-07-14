@@ -98,6 +98,22 @@ description = "open workboard"
 Mouse: click to select, double-click to jump to the session, drag a card to
 another column to move it (pane moves too), wheel to scroll a column.
 
+Row 2 is a status bar: the board's preferred agent, whether auto-sync is on,
+and — when the selected card has its own agent override (set via `o`) — that
+override too, so you always know which agent `s` (or a move into the working
+column) is about to use.
+
+## Layout: sessions tile the tab, reusing empty panes
+
+Every state tab starts with one empty shell pane. Starting a session or moving
+a card into a tab **reuses that empty pane** instead of splitting a new one;
+if the tab has no spare pane, the newcomer lands in a fresh split chosen so
+repeated arrivals **tile the tab into an even grid** (2 sessions side by side,
+4 in a roughly square 2×2, and so on) rather than a lopsided stack of slivers.
+If an idle pane is left over in a busy tab (e.g. after its session moved
+elsewhere), the next arrival closes it and takes its spot instead of growing
+the pane count.
+
 ## Task states
 
 Default columns are `todo · doing · review · done`. Each column is a real tab
@@ -160,10 +176,14 @@ return before the file is saved won't work.
 ## Auto-sync: columns follow the agent
 
 With auto-sync on (the default — toggle per board with `A`), the columns track
-the agent session's state machine:
+the agent session's state machine, in both directions:
 
-- **starting an agent session** moves the card to the working column
+- **starting an agent session** (`s`/`o`) moves the card to the working column
   (`doing`) so the pane spawns in the right tab from the start
+- **moving a session-less card into the working column** — by hand (`]`/`H`)
+  or by dragging it there — is treated as starting work on it: the board
+  spawns the card's preferred agent right there, the same as pressing `s`
+  would. A card that already has a session just moves (no double-start).
 - agent turns **`working`** → card moves to `doing` — including *rework*:
   reopening an agent on a reviewed card pulls it back
 - agent turns **`done`** → card advances to `review` (or `done` when no

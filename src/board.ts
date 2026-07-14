@@ -410,6 +410,19 @@ function drawBoard(scr: Screen): void {
   const right = `${cwdShort} `;
   scr.text(Math.max(hx + 2, scr.w - strWidth(right)), 0, right, SGR.headerBg + SGR.faint);
 
+  // status bar: preferred agent, auto-sync, and the selected card's override
+  let sx = 1;
+  sx += scr.text(sx, 1, "agent ", SGR.faint);
+  sx += scr.text(sx, 1, agentLabel(b.agent_cmd), SGR.accent);
+  sx += scr.text(sx, 1, "   auto-sync ", SGR.faint);
+  const syncOn = autoSyncEnabled();
+  sx += scr.text(sx, 1, syncOn ? "on" : "off", syncOn ? SGR.green : SGR.faint);
+  const sel = selectedTask();
+  if (sel?.agent_cmd?.length && sel.agent_cmd.join(" ") !== b.agent_cmd.join(" ")) {
+    sx += scr.text(sx, 1, "   card agent ", SGR.faint);
+    scr.text(sx, 1, agentLabel(sel.agent_cmd), SGR.amber, Math.max(0, scr.w - sx - 1));
+  }
+
   // columns
   const n = b.states.length;
   if (n === 0) return;

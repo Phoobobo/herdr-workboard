@@ -151,14 +151,6 @@ export async function ensureStateTabs(board: Board): Promise<void> {
   }
 }
 
-/** A pane inside the given tab to split from / move next to. */
-async function tabAnchorPane(tabId: string): Promise<string> {
-  const res = await request<{ panes: PaneInfo[] }>("pane.list", {});
-  const inTab = res.panes.filter((p) => p.tab_id === tabId);
-  if (inTab.length === 0) throw new Error(`no panes in tab ${tabId}`);
-  return (inTab.find((p) => p.focused) ?? inTab[0]).pane_id;
-}
-
 // ---- sessions ----
 
 /** Shells we can safely detect as "idle" foregrounds. */
@@ -176,28 +168,87 @@ interface PaneProcessInfo {
   foreground_processes?: Array<{ pid: number; name?: string; argv?: string[]; cmdline?: string }>;
 }
 
-/**
- * An unclaimed pane in the tab whose foreground is provably just an idle
- * shell — e.g. the root shell every state tab starts with. Returns the pane
- * plus whether that shell is POSIX enough to exec an agent command into.
- */
-async function findIdlePane(board: Board, tabId: string): Promise<{ pane: PaneInfo; posix: boolean } | null> {
-  const res = await request<{ panes: PaneInfo[] }>("pane.list", {});
+function claimedPaneIds(board: Board): Set<string> {
   const claimed = new Set(board.tasks.filter((t) => !t.archived && t.pane_id).map((t) => t.pane_id as string));
   if (board.board_pane_id) claimed.add(board.board_pane_id);
-  const candidates = res.panes.filter((p) => p.tab_id === tabId && !claimed.has(p.pane_id) && !p.agent);
+  return claimed;
+}
+
+/**
+ * Unclaimed panes in the tab whose foreground is provably just an idle shell
+ * — e.g. the root shell every state tab starts with. `posix` says whether
+ * that shell is POSIX enough to exec an agent command into. Pass an
+ * already-fetched pane list to skip the round trip.
+ */
+async function idleShellPanesInTab(board: Board, tabId: string, allPanes?: PaneInfo[]): Promise<Array<{ pane: PaneInfo; posix: boolean }>> {
+  const panes = allPanes ?? (await request<{ panes: PaneInfo[] }>("pane.list", {})).panes;
+  const claimed = claimedPaneIds(board);
+  const candidates = panes.filter((p) => p.tab_id === tabId && !claimed.has(p.pane_id) && !p.agent);
+  const idle: Array<{ pane: PaneInfo; posix: boolean }> = [];
   for (const pane of candidates) {
     try {
-      const res2 = await request<{ process_info: PaneProcessInfo }>("pane.process_info", { pane_id: pane.pane_id });
-      const procs = res2.process_info?.foreground_processes ?? [];
+      const res = await request<{ process_info: PaneProcessInfo }>("pane.process_info", { pane_id: pane.pane_id });
+      const procs = res.process_info?.foreground_processes ?? [];
       if (procs.length > 0 && procs.every((p) => SHELL_NAME_RE.test(p.name ?? ""))) {
-        return { pane, posix: procs.every((p) => POSIX_SHELL_RE.test(p.name ?? "")) };
+        idle.push({ pane, posix: procs.every((p) => POSIX_SHELL_RE.test(p.name ?? "")) });
       }
     } catch {
       // can't prove it's idle — leave it alone
     }
   }
-  return null;
+  return idle;
+}
+
+async function findIdlePane(board: Board, tabId: string): Promise<{ pane: PaneInfo; posix: boolean } | null> {
+  return (await idleShellPanesInTab(board, tabId))[0] ?? null;
+}
+
+/**
+ * Character cells are roughly twice as tall as wide, so comparing raw
+ * width/height would nearly always prefer splitting into columns. Correcting
+ * height by this factor makes the comparison track visual squareness.
+ */
+const GRID_ASPECT = 2;
+
+/**
+ * Where the next pane should land in a tab, so repeated arrivals tile the
+ * tab into a roughly even grid (2 panes → left/right; 4 → a 2x2 grid; …)
+ * instead of a lopsided stack of slivers. If the tab already holds an idle,
+ * unclaimed shell pane (and isn't down to just that one pane), it is closed
+ * first so the newcomer reclaims its spot instead of growing the pane count.
+ */
+export async function prepareTabForArrival(board: Board, tabId: string): Promise<{ targetPaneId: string; direction: "right" | "down"; ratio: number }> {
+  let panes = (await request<{ panes: PaneInfo[] }>("pane.list", {})).panes.filter((p) => p.tab_id === tabId);
+  if (panes.length === 0) throw new Error(`no panes in tab ${tabId}`);
+
+  if (panes.length > 1) {
+    const idle = await idleShellPanesInTab(board, tabId, panes);
+    if (idle.length > 0) {
+      const victim = idle[0].pane;
+      try {
+        await request("pane.close", { pane_id: victim.pane_id });
+        panes = panes.filter((p) => p.pane_id !== victim.pane_id);
+      } catch {
+        // best effort — worst case the newcomer just splits alongside it
+      }
+    }
+  }
+
+  const anchor = panes[0].pane_id;
+  let targetId = anchor;
+  let direction: "right" | "down" = "right";
+  try {
+    const res = await request<{ layout: { panes: Array<{ pane_id: string; rect: { width: number; height: number } }> } }>("pane.layout", { pane_id: anchor });
+    const rects = res.layout.panes.filter((p) => panes.some((q) => q.pane_id === p.pane_id));
+    if (rects.length > 0) {
+      const best = rects.reduce((a, b) => (b.rect.width * b.rect.height > a.rect.width * a.rect.height ? b : a));
+      targetId = best.pane_id;
+      direction = best.rect.width > best.rect.height * GRID_ASPECT ? "right" : "down";
+    }
+  } catch {
+    // layout lookup failed — fall back to a plain right-split off the anchor
+  }
+  return { targetPaneId: targetId, direction, ratio: 0.5 };
 }
 
 function sessionEnv(board: Board, task: Task): Record<string, string> {
@@ -269,6 +320,8 @@ export async function startSession(board: Board, task: Task, kind: "agent" | "sh
   const idle = await findIdlePane(board, tabId);
   let pane: PaneInfo;
   if (idle && (kind === "shell" || idle.posix)) {
+    // take the pane that's already sitting there empty, rather than growing
+    // the tab's pane count
     pane = idle.pane;
     const paneCwd = pane.foreground_cwd ?? pane.cwd;
     const cd = paneCwd !== board.cwd ? `cd ${shQuote(board.cwd)} && ` : "";
@@ -282,26 +335,27 @@ export async function startSession(board: Board, task: Task, kind: "agent" | "sh
     } else if (cd) {
       await request("pane.send_input", { pane_id: pane.pane_id, text: ` cd ${shQuote(board.cwd)}`, keys: ["Enter"] });
     }
-  } else if (kind === "agent") {
-    const res = await request<{ agent: PaneInfo }>("agent.start", {
-      name: `wb-${task.seq}-${Date.now().toString(36)}`,
-      argv: [...agentCmd, prompt],
-      cwd: board.cwd,
-      tab_id: tabId,
-      focus: false,
-      env,
-    });
-    pane = res.agent;
   } else {
+    // no reusable idle pane — land in a fresh split, chosen so repeated
+    // arrivals tile the tab into an even grid instead of a lopsided stack
+    const spot = await prepareTabForArrival(board, tabId);
     const res = await request<{ pane: PaneInfo }>("pane.split", {
       workspace_id: board.workspace_id,
-      target_pane_id: await tabAnchorPane(tabId),
-      direction: "right",
+      target_pane_id: spot.targetPaneId,
+      direction: spot.direction,
+      ratio: spot.ratio,
       cwd: board.cwd,
       focus: false,
       env,
     });
     pane = res.pane;
+    if (kind === "agent") {
+      const assigns = Object.entries(env)
+        .map(([k, v]) => `${k}=${shQuote(v)}`)
+        .join(" ");
+      const argv = [...agentCmd, prompt].map(shQuote).join(" ");
+      await request("pane.send_input", { pane_id: pane.pane_id, text: ` ${assigns} exec ${argv}`, keys: ["Enter"] });
+    }
   }
 
   task.pane_id = pane.pane_id;
@@ -327,6 +381,7 @@ export async function moveTaskToState(board: Board, task: Task, targetStateId: s
   const target = board.states.find((s) => s.id === targetStateId);
   if (!target) throw new Error("unknown target state");
   if (task.state_id === targetStateId) return;
+  const hadNoSession = !task.pane_id;
 
   if (task.pane_id) {
     const tabId = await ensureStateTab(board, target);
@@ -354,17 +409,20 @@ export async function moveTaskToState(board: Board, task: Task, targetStateId: s
     } catch {
       // best effort — worst case the tab closes and is recreated on demand
     }
+    // Reclaim any idle pane sitting in the destination and pick a grid-aware
+    // landing spot, same as a fresh session would.
+    const spot = await prepareTabForArrival(board, tabId);
     const move = () =>
       request<{ move_result: PaneMoveResult }>("pane.move", {
         pane_id: task.pane_id,
-        destination: { type: "tab", tab_id: tabId, split: "right" },
+        destination: { type: "tab", tab_id: tabId, target_pane_id: spot.targetPaneId, split: spot.direction, ratio: spot.ratio },
         // followFocus keeps the user attached when THEIR focused pane moves
         focus: followFocus,
       });
     let { move_result: mv } = await move();
     if (!mv.changed && mv.reason === "zoomed_tab") {
       await request("pane.zoom", { pane_id: task.pane_id, mode: "off" }).catch(() => {});
-      await request("pane.zoom", { pane_id: await tabAnchorPane(tabId), mode: "off" }).catch(() => {});
+      await request("pane.zoom", { pane_id: spot.targetPaneId, mode: "off" }).catch(() => {});
       ({ move_result: mv } = await move());
       if (refocusPaneId) await request("pane.zoom", { pane_id: refocusPaneId, mode: "off" }).catch(() => {});
     }
@@ -381,6 +439,12 @@ export async function moveTaskToState(board: Board, task: Task, targetStateId: s
   task.state_id = targetStateId;
   task.updated_at = Date.now();
   saveBoard(board);
+
+  // Moving a session-less card into the working column IS starting work on
+  // it: spawn its preferred agent there, same as pressing s would.
+  if (hadNoSession && stateForStatus(board, "working")?.id === targetStateId) {
+    await startSession(board, task, "agent");
+  }
 }
 
 export async function archiveTask(board: Board, task: Task, closePane: boolean): Promise<void> {
