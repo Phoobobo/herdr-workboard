@@ -118,7 +118,9 @@ export function resolveBoardForWorkspace(workspaceId: string): Board | null {
   const bound = loadBindings()[workspaceId];
   if (bound) {
     const b = loadBoard(bound);
-    if (b) return b;
+    // A stale/corrupt binding must never resolve a board across workspace
+    // boundaries. The board record is the authority for its current scope.
+    if (b?.workspace_id === workspaceId) return b;
   }
   for (const b of listBoards()) {
     if (b.workspace_id === workspaceId) return b;
