@@ -63,6 +63,20 @@ The action takes its project directory from the **active** workspace. Re-invokin
 it focuses the existing board; if the board workspace was closed (or the herdr
 server restarted), it rebuilds the workspace with all tasks preserved.
 
+To create a **new independent board workspace** for another task in the same
+repository, invoke the separate `new` action:
+
+```bash
+herdr plugin action invoke phoobobo.workboard.new
+```
+
+Unlike `init`, `new` never looks up or reuses a board by project directory. It
+always creates and focuses a fresh workspace with its own board ID, workflow
+snapshot, transition history, and role runs. Invoke it from the ordinary Herdr
+workspace whose cwd should be used, then initialize that newly focused board's
+workflow with `herdr-workboard workflow init ...`. Existing `init` behavior is
+unchanged for interactive users who want one reusable board per project.
+
 Re-focus or repair the board later (e.g. after a server restart left the board
 pane as a plain shell):
 

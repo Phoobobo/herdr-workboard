@@ -1,8 +1,8 @@
 // Plugin action entrypoint. herdr invokes this with HERDR_PLUGIN_ACTION_ID set
 // (an argv fallback keeps `bun run src/actions.ts init` usable by hand).
 //
-//   init  create a dedicated board workspace for the current project:
-//         tab 1 = the workboard TUI, then one tab per task state
+//   init  create or reuse a dedicated board workspace for the current project
+//   new   always create another independent board workspace for the project
 //   open  focus the board for the current workspace/project, recreating the
 //         board pane (and, after a server restart, the whole workspace) if needed
 
@@ -13,7 +13,7 @@ import * as store from "./store.ts";
 import * as ctl from "./boardctl.ts";
 import type { Board, PaneInfo, TabInfo, WorkspaceInfo } from "./types.ts";
 
-interface Ctx {
+export interface Ctx {
   workspace_id?: string;
   workspace_label?: string;
   workspace_cwd?: string;
@@ -115,6 +115,21 @@ async function actionInit(ctx: Ctx): Promise<void> {
   );
 }
 
+/** Always create a fresh board, even when another board uses the same cwd. */
+export async function actionNew(
+  ctx: Ctx,
+  builder: (board: Board) => Promise<void> = buildWorkspace,
+): Promise<Board> {
+  const cwd = ctx.workspace_cwd ?? ctx.focused_pane_cwd ?? os.homedir();
+  const board = ctl.makeBoard(path.basename(cwd), cwd, "");
+  await builder(board);
+  console.log(
+    `workboard: created independent board '${board.name}' — workspace ${board.workspace_id}, ` +
+      `states: ${board.states.map((s) => s.name).join(", ")}`,
+  );
+  return board;
+}
+
 async function actionOpen(ctx: Ctx): Promise<void> {
   const cwd = ctx.workspace_cwd ?? ctx.focused_pane_cwd ?? "";
   const board =
@@ -193,6 +208,7 @@ async function main(): Promise<void> {
   } catch {}
   store.ensureDirs();
   if (action === "init") await actionInit(ctx);
+  else if (action === "new") await actionNew(ctx);
   else if (action === "open") await actionOpen(ctx);
   else {
     console.error(`workboard: unknown action '${action}'`);
@@ -200,7 +216,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => {
-  console.error(`workboard action failed: ${e instanceof Error ? e.message : e}`);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((e) => {
+    console.error(`workboard action failed: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  });
+}
