@@ -10,9 +10,10 @@ import os from "node:os";
 import { HerdrApiError, request, subscribe, type EventStream } from "./herdr.ts";
 import * as store from "./store.ts";
 import * as ctl from "./boardctl.ts";
+import { loadWorkflow } from "./workflow.ts";
 import { detectAgents, manifestIdFor, agentLabel, type DetectedAgent } from "./agents.ts";
 import { SGR, Screen, truncate, strWidth, InputParser, fmtAge, type InputEvent } from "./ui.ts";
-import type { AgentStatus, Board, PaneInfo, Task } from "./types.ts";
+import type { AgentStatus, Board, PaneInfo, Task, WorkflowTask } from "./types.ts";
 
 const SELF_PANE = process.env.HERDR_PANE_ID ?? "";
 const SELF_WS = process.env.HERDR_WORKSPACE_ID ?? "";
@@ -43,6 +44,7 @@ interface CardHit {
 }
 
 let board: Board | null = null;
+let workflow: WorkflowTask | null = null;
 let live: ctl.LiveState = { tabs: new Map(), panes: new Map() };
 let mode: Mode = { type: "normal" };
 let selCol = 0;
@@ -246,6 +248,7 @@ async function refresh(): Promise<void> {
     if (!busy && !modal && syncInFlight.size === 0) {
       const fresh = store.loadBoard(board.id);
       if (fresh) board = fresh;
+      workflow = loadWorkflow(board.id);
     }
     live = await ctl.fetchLive();
     if (ctl.reconcile(board, live)) store.saveBoard(board);
@@ -417,6 +420,19 @@ function drawBoard(scr: Screen): void {
   sx += scr.text(sx, 1, "   auto-sync ", SGR.faint);
   const syncOn = autoSyncEnabled();
   sx += scr.text(sx, 1, syncOn ? "on" : "off", syncOn ? SGR.green : SGR.faint);
+  if (workflow) {
+    sx += scr.text(sx, 1, "   workflow ", SGR.faint);
+    sx += scr.text(sx, 1, workflow.current_stage, SGR.lilac);
+    const latestByRole = new Map<string, (typeof workflow.runs)[number]>();
+    for (const roleRun of workflow.runs) latestByRole.set(roleRun.role, roleRun);
+    const runText = [...latestByRole.values()]
+      .map((roleRun) => `${roleRun.role}:${roleRun.status === "running" ? "running" : roleRun.result}`)
+      .join(" · ");
+    if (runText) {
+      sx += scr.text(sx, 1, "   runs ", SGR.faint);
+      sx += scr.text(sx, 1, runText, SGR.dim, Math.max(0, scr.w - sx - 1));
+    }
+  }
   const sel = selectedTask();
   if (sel?.agent_cmd?.length && sel.agent_cmd.join(" ") !== b.agent_cmd.join(" ")) {
     sx += scr.text(sx, 1, "   card agent ", SGR.faint);
@@ -1241,6 +1257,7 @@ async function main(): Promise<void> {
     });
 
   board = resolveBoard();
+  workflow = board ? loadWorkflow(board.id) : null;
   if (!board) {
     mode = { type: "noboard" };
     draw();

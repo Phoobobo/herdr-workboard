@@ -12,6 +12,12 @@ contexts = ["global", "workspace"]
 command = ["bun", "run", "src/actions.ts", "init"]
 
 [[actions]]
+id = "new"
+title = "Workboard: create another independent board"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions.ts", "new"]
+
+[[actions]]
 id = "open"
 title = "Workboard: open board"
 contexts = ["global", "workspace"]

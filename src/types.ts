@@ -74,6 +74,58 @@ export interface Task {
   archived?: boolean;
 }
 
+export interface WorkflowStage {
+  name: string;
+  agent: string;
+  success_message: string;
+  retry_message?: string;
+  retry_to?: string;
+  output?: unknown;
+  terminal: boolean;
+  transitions: string[];
+}
+
+export type RoleRunResult = "passed" | "failed" | "blocked";
+
+export interface RoleRun {
+  id: string;
+  role: string;
+  started_at: number;
+  ended_at?: number;
+  result?: RoleRunResult;
+  status: "running" | "finished";
+}
+
+export interface TransitionRecord {
+  request_id: string;
+  input: { state: string };
+  result: WorkflowStatus;
+}
+
+export interface WorkflowTask {
+  version: 1;
+  board_id: string;
+  workspace_id: string;
+  source?: string;
+  initialized_at: number;
+  updated_at: number;
+  current_stage: string;
+  stages: WorkflowStage[];
+  runs: RoleRun[];
+  requests: TransitionRecord[];
+}
+
+export interface WorkflowStatus {
+  board_id: string;
+  workspace_id: string;
+  current_stage: string;
+  terminal: boolean;
+  stage: WorkflowStage;
+  runs: RoleRun[];
+  current_runs: RoleRun[];
+  updated_at: number;
+}
+
 export interface Board {
   version: 1;
   id: string;

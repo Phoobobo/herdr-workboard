@@ -34,6 +34,22 @@ Or, for local development:
 herdr plugin link /path/to/herdr-workboard
 ```
 
+Plugin installation does **not** place a global executable on `PATH`. To install
+the optional workflow CLI from a checkout (including the same checkout used by
+`plugin link`):
+
+```bash
+cd /path/to/herdr-workboard
+bun install
+bun link                 # installs the package's real `herdr-workboard` bin
+```
+
+Without linking it globally, use the exact equivalent:
+
+```bash
+bun run /path/to/herdr-workboard/src/cli.ts <command> ...
+```
+
 ## Usage
 
 Create a board for the current project (a new workspace: `board` tab first,
@@ -46,6 +62,20 @@ herdr plugin action invoke phoobobo.workboard.init
 The action takes its project directory from the **active** workspace. Re-invoking
 it focuses the existing board; if the board workspace was closed (or the herdr
 server restarted), it rebuilds the workspace with all tasks preserved.
+
+To create a **new independent board workspace** for another task in the same
+repository, invoke the separate `new` action:
+
+```bash
+herdr plugin action invoke phoobobo.workboard.new
+```
+
+Unlike `init`, `new` never looks up or reuses a board by project directory. It
+always creates and focuses a fresh workspace with its own board ID, workflow
+snapshot, transition history, and role runs. Invoke it from the ordinary Herdr
+workspace whose cwd should be used, then initialize that newly focused board's
+workflow with `herdr-workboard workflow init ...`. Existing `init` behavior is
+unchanged for interactive users who want one reusable board per project.
 
 Re-focus or repair the board later (e.g. after a server restart left the board
 pane as a plain shell):
@@ -113,6 +143,63 @@ repeated arrivals **tile the tab into an even grid** (2 sessions side by side,
 If an idle pane is left over in a busy tab (e.g. after its session moved
 elsewhere), the next arrival closes it and takes its spot instead of growing
 the pane count.
+
+## Workspace workflow CLI
+
+A board workspace may also own one top-level, machine-driven workflow task.
+The CLI resolves the current workspace from Herdr's pane environment (or the
+focused workspace through the Herdr socket), so callers never pass board,
+workspace, or task IDs.
+
+Initialize it from YAML:
+
+```yaml
+stages:
+  plan:
+    agent: planner
+    success_message: Plan is ready
+    terminal: false
+  implement:
+    agent: implementer
+    success_message: Implementation is ready
+    retry_message: Revise the plan
+    retry_to: plan
+    output: implementation.md
+    terminal: false
+  complete:
+    agent: verifier
+    success_message: Workflow complete
+    terminal: true
+```
+
+```bash
+herdr-workboard workflow init ./workflow.yaml --json
+herdr-workboard status --json
+herdr-workboard run start implementer --json
+herdr-workboard run finish implementer --result passed --json
+herdr-workboard transition implement --request-id dispatch-001 --json
+```
+
+`workflow init` refuses to replace an existing workflow; use `--force` for an
+explicit reset. Stage order defines the normal transition to the next stage.
+`retry_to` adds one extra legal edge from that stage. A terminal stage has no
+outgoing edges and must be last. The complete validated stage graph is copied
+into the workspace snapshot at initialization, so editing the YAML later does
+not change an active workflow.
+
+Every command accepts `--json`. Successful JSON has the shape
+`{"ok":true,"status":...}`; failures are written to stderr as
+`{"ok":false,"error":{"code":...,"message":...}}` and return nonzero.
+Stable workflow errors include `INVALID_WORKFLOW`, `WORKFLOW_NOT_FOUND`,
+`INVALID_TRANSITION`, and `REQUEST_CONFLICT`. Transition request IDs are
+idempotency keys: replaying the same state/ID returns the original result;
+reusing the ID for another state is a conflict.
+
+Role runs are independent execution records. `run start` records role and
+start time; `run finish` records end time and `passed`, `failed`, or `blocked`.
+`status` exposes all runs plus currently running runs. The TUI status row shows
+the current workflow stage and the latest status for each role. Workflow
+transitions do not move Kanban cards or Herdr panes.
 
 ## Task states
 
@@ -214,9 +301,18 @@ tracked per cell, so a card border never lands on the second half of a glyph.
 ## Storage
 
 Boards are plain JSON under herdr's plugin state dir
-(`~/.local/state/herdr/plugins/phoobobo.workboard/`). No daemon, no database:
-the TUI reads herdr's live state over the socket API, subscribes to lifecycle
-events, and reconciles on every change.
+(`~/.local/state/herdr/plugins/phoobobo.workboard/`). Kanban board documents
+remain under `boards/`; workspace workflow snapshots and request/run history
+are stored separately under `workflows/`. Writes are atomic and workflow
+mutations use a short filesystem lock so concurrent CLI requests cannot apply
+twice. These files are implementation details: integrations must use the CLI,
+not edit JSON directly. No daemon, database, credentials, or additional
+service is used. The TUI reads Herdr's live state over the socket API,
+subscribes to lifecycle events, and reconciles on every change.
+
+Existing Kanban boards need no migration. Boards without an initialized
+workflow behave exactly as before; workflow mode only adds status-row content
+when a snapshot exists.
 
 ## Known limitations
 
@@ -239,6 +335,8 @@ events, and reconciles on every change.
 herdr-plugin.toml   plugin manifest (actions, pane entrypoint)
 src/herdr.ts        socket client (one request per connection + event stream)
 src/store.ts        board persistence (atomic JSON writes)
+src/workflow.ts     workflow validation, snapshots, transitions, and role runs
+src/cli.ts          workspace-scoped machine CLI
 src/boardctl.ts     kanban verbs -> herdr socket calls
 src/ui.ts           cell-buffer renderer (CJK-safe) + key/mouse parser
 src/board.ts        the kanban TUI
