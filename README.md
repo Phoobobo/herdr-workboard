@@ -63,6 +63,23 @@ The action takes its project directory from the **active** workspace. Re-invokin
 it focuses the existing board; if the board workspace was closed (or the herdr
 server restarted), it rebuilds the workspace with all tasks preserved.
 
+To add Workboard to the **currently active workspace** without replacing its
+existing first tab, invoke the `attach` action:
+
+```bash
+herdr plugin action invoke phoobobo.workboard.attach
+```
+
+`attach` is workspace-only and takes no arguments. It creates a fresh,
+independent board using the active workspace's cwd and label. The existing tab
+strip is left intact and in the same order: the board TUI is appended in a new
+`board` tab, followed by newly created `todo`, `doing`, `review`, and `done`
+state tabs. The board and any workflow later initialized through the CLI are
+bound to that active workspace. If the workspace is already bound to a board,
+`attach` opens/focuses that board instead and creates nothing. If setup fails,
+its partial board record and newly appended tabs are rolled back without
+changing existing board bindings.
+
 To create a **new independent board workspace** for another task in the same
 repository, invoke the separate `new` action:
 
@@ -340,7 +357,7 @@ src/cli.ts          workspace-scoped machine CLI
 src/boardctl.ts     kanban verbs -> herdr socket calls
 src/ui.ts           cell-buffer renderer (CJK-safe) + key/mouse parser
 src/board.ts        the kanban TUI
-src/actions.ts      init / open plugin actions
+src/actions.ts      init / new / open / attach plugin actions
 ```
 
 Zero runtime dependencies; TypeScript runs directly under bun.
