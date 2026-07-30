@@ -112,6 +112,23 @@ export function bindWorkspace(workspaceId: string, boardId: string): void {
   writeAtomic(bindingsPath(), JSON.stringify(bindings, null, 2) + "\n");
 }
 
+/** Remove a workspace binding only when it still points at the expected board. */
+export function unbindWorkspace(workspaceId: string, boardId: string): void {
+  const bindings = loadBindings();
+  if (bindings[workspaceId] !== boardId) return;
+  delete bindings[workspaceId];
+  ensureDirs();
+  writeAtomic(bindingsPath(), JSON.stringify(bindings, null, 2) + "\n");
+}
+
+export function deleteBoard(id: string): void {
+  try {
+    fs.unlinkSync(path.join(boardsDir(), `${id}.json`));
+  } catch (err) {
+    if (!isEnoent(err)) throw err;
+  }
+}
+
 /** Board bound to a workspace, by binding first, then by recorded workspace id. */
 export function resolveBoardForWorkspace(workspaceId: string): Board | null {
   if (!workspaceId) return null;

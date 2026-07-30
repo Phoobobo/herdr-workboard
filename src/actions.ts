@@ -3,8 +3,9 @@
 //
 //   init  create or reuse a dedicated board workspace for the current project
 //   new   always create another independent board workspace for the project
-//   open  focus the board for the current workspace/project, recreating the
-//         board pane (and, after a server restart, the whole workspace) if needed
+//   open    focus the board for the current workspace/project, recreating the
+//           board pane (and, after a server restart, the whole workspace) if needed
+//   attach  append a fresh board and its state tabs to the active workspace
 
 import path from "node:path";
 import os from "node:os";
@@ -115,6 +116,88 @@ async function actionInit(ctx: Ctx): Promise<void> {
   );
 }
 
+type ActionRequest = <T = any>(method: string, params?: Record<string, unknown>) => Promise<T>;
+
+export interface AttachDeps {
+  request: ActionRequest;
+  focusExisting: (ctx: Ctx) => Promise<void>;
+}
+
+const defaultAttachDeps: AttachDeps = {
+  request,
+  focusExisting: actionOpen,
+};
+
+/**
+ * Attach a fresh independent board to the active workspace. Existing tabs are
+ * never passed to a replacement API: the board and state tabs are appended in
+ * that order. Persistence is committed only after the complete layout exists.
+ */
+export async function actionAttach(ctx: Ctx, deps: AttachDeps = defaultAttachDeps): Promise<Board> {
+  const workspaceId = ctx.workspace_id?.trim();
+  if (!workspaceId) throw new Error("attach requires an active workspace context");
+
+  const bound = store.resolveBoardForWorkspace(workspaceId);
+  if (bound) {
+    await deps.focusExisting(ctx);
+    console.log(`workboard: focused board '${bound.name}' already attached to workspace ${workspaceId}`);
+    return bound;
+  }
+
+  const cwd = ctx.workspace_cwd ?? ctx.focused_pane_cwd ?? os.homedir();
+  const board = ctl.makeBoard(ctx.workspace_label?.trim() || path.basename(cwd), cwd, workspaceId);
+  const createdTabIds: string[] = [];
+
+  // The board process needs its document as soon as its new pane starts. The
+  // workspace binding remains uncommitted until every configured tab exists.
+  store.saveBoard(board);
+  try {
+    const opened = await deps.request<{ plugin_pane: { pane: PaneInfo } }>("plugin.pane.open", {
+      plugin_id: store.PLUGIN_ID,
+      entrypoint: "board",
+      placement: "tab",
+      workspace_id: workspaceId,
+      focus: false,
+      env: boardEnv(board),
+    });
+    board.board_pane_id = opened.plugin_pane.pane.pane_id;
+    createdTabIds.push(opened.plugin_pane.pane.tab_id);
+    await deps.request("tab.rename", { tab_id: opened.plugin_pane.pane.tab_id, label: ctl.BOARD_TAB_LABEL });
+    store.saveBoard(board);
+
+    // Do not use ensureStateTabs here: attach must create its own tabs rather
+    // than adopt a client's pre-existing tab that happens to share a label.
+    for (const state of board.states) {
+      const created = await deps.request<{ tab: TabInfo }>("tab.create", {
+        workspace_id: workspaceId,
+        cwd: board.cwd,
+        label: state.name,
+        focus: false,
+      });
+      state.tab_id = created.tab.tab_id;
+      createdTabIds.push(created.tab.tab_id);
+      store.saveBoard(board);
+    }
+
+    store.bindWorkspace(workspaceId, board.id);
+    await deps.request("workspace.focus", { workspace_id: workspaceId });
+    await deps.request("tab.focus", { tab_id: opened.plugin_pane.pane.tab_id });
+  } catch (error) {
+    for (const tabId of createdTabIds.reverse()) {
+      await deps.request("tab.close", { tab_id: tabId }).catch(() => {});
+    }
+    store.unbindWorkspace(workspaceId, board.id);
+    store.deleteBoard(board.id);
+    throw error;
+  }
+
+  console.log(
+    `workboard: attached independent board '${board.name}' to workspace ${workspaceId} — ` +
+      `states: ${board.states.map((state) => state.name).join(", ")}`,
+  );
+  return board;
+}
+
 /** Always create a fresh board, even when another board uses the same cwd. */
 export async function actionNew(
   ctx: Ctx,
@@ -210,6 +293,7 @@ async function main(): Promise<void> {
   if (action === "init") await actionInit(ctx);
   else if (action === "new") await actionNew(ctx);
   else if (action === "open") await actionOpen(ctx);
+  else if (action === "attach") await actionAttach(ctx);
   else {
     console.error(`workboard: unknown action '${action}'`);
     process.exit(1);
