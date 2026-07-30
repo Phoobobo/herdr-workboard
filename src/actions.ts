@@ -46,7 +46,7 @@ async function focusBoard(board: Board): Promise<void> {
 }
 
 /** Create the board workspace: board TUI in tab 1, then one tab per state. */
-async function buildWorkspace(board: Board): Promise<void> {
+export async function buildWorkspace(board: Board): Promise<void> {
   const ws = await request<{ workspace: WorkspaceInfo; tab: TabInfo }>("workspace.create", {
     cwd: board.cwd,
     label: `▦ ${board.name}`,

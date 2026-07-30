@@ -76,7 +76,7 @@ describe("workflow validation", () => {
 });
 
 test("legal transitions persist and illegal transitions do not mutate", () => {
-  initializeWorkflow(board, VALID, "workflow.yaml", false, 10);
+  initializeWorkflow(board, VALID, { source: "workflow.yaml", now: 10 });
   const moved = transitionWorkflow(board.id, "build", "request-1", 20);
   expect(moved.current_stage).toBe("build");
 
@@ -104,7 +104,7 @@ test("request IDs are idempotent and conflict on changed input", () => {
 test("workflow snapshot and role runs survive reloads", () => {
   const sourceFile = path.join(dir, "workflow.yaml");
   fs.writeFileSync(sourceFile, VALID);
-  initializeWorkflow(board, fs.readFileSync(sourceFile, "utf8"), sourceFile, false, 10);
+  initializeWorkflow(board, fs.readFileSync(sourceFile, "utf8"), { source: sourceFile, now: 10 });
   fs.writeFileSync(sourceFile, VALID.replace("build:", "changed:"));
 
   startRoleRun(board.id, "builder", 20);

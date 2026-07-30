@@ -81,6 +81,8 @@ export interface WorkflowStage {
   retry_message?: string;
   retry_to?: string;
   output?: unknown;
+  /** Column this stage lives in; defaults to a column named like the stage. */
+  state?: string;
   terminal: boolean;
   transitions: string[];
 }
@@ -96,28 +98,39 @@ export interface RoleRun {
   status: "running" | "finished";
 }
 
-export interface TransitionRecord {
+/**
+ * An idempotency record. `input` carries the whole request payload so replaying
+ * an ID with different arguments is a detectable conflict; `op` is absent on
+ * records written before runs were made idempotent (those are all transitions).
+ */
+export interface RequestRecord {
   request_id: string;
-  input: { state: string };
+  input: { op?: "transition" | "run.start" | "run.finish"; state?: string; role?: string; result?: RoleRunResult };
   result: WorkflowStatus;
 }
+
+/** @deprecated use RequestRecord — kept so older imports keep compiling. */
+export type TransitionRecord = RequestRecord;
 
 export interface WorkflowTask {
   version: 1;
   board_id: string;
   workspace_id: string;
   source?: string;
+  /** Kanban card this workflow drives, when bound at init. */
+  task_id?: string;
   initialized_at: number;
   updated_at: number;
   current_stage: string;
   stages: WorkflowStage[];
   runs: RoleRun[];
-  requests: TransitionRecord[];
+  requests: RequestRecord[];
 }
 
 export interface WorkflowStatus {
   board_id: string;
   workspace_id: string;
+  task_id?: string;
   current_stage: string;
   terminal: boolean;
   stage: WorkflowStage;
