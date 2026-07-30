@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { newId, resolveBoardForWorkspace, stateDir } from "./store.ts";
-import type { Board, RoleRun, RoleRunResult, WorkflowStage, WorkflowStatus, WorkflowTask } from "./types.ts";
+import { loadBoard, newId, resolveBoardForWorkspace, stateDir } from "./store.ts";
+import type { Board, RequestRecord, RoleRun, RoleRunResult, WorkflowStage, WorkflowStatus, WorkflowTask } from "./types.ts";
 
 export type WorkflowErrorCode =
   | "INVALID_ARGUMENT"
@@ -11,7 +11,10 @@ export type WorkflowErrorCode =
   | "INVALID_WORKFLOW"
   | "INVALID_TRANSITION"
   | "REQUEST_CONFLICT"
-  | "RUN_NOT_FOUND";
+  | "RUN_NOT_FOUND"
+  | "BOARD_NOT_FOUND"
+  | "TASK_NOT_FOUND"
+  | "STATE_NOT_FOUND";
 
 export class WorkflowError extends Error {
   constructor(public code: WorkflowErrorCode, message: string) {
@@ -125,6 +128,7 @@ export function parseWorkflow(text: string): WorkflowStage[] {
       ...(value.retry_message === undefined ? {} : { retry_message: nonEmpty(value.retry_message, `stage '${name}'.retry_message`) }),
       ...(value.retry_to === undefined ? {} : { retry_to: nonEmpty(value.retry_to, `stage '${name}'.retry_to`) }),
       ...(value.output === undefined ? {} : { output: value.output }),
+      ...(value.state === undefined ? {} : { state: nonEmpty(value.state, `stage '${name}'.state`) }),
       terminal: value.terminal,
       transitions: [],
     };
@@ -147,8 +151,20 @@ export function parseWorkflow(text: string): WorkflowStage[] {
   return stages;
 }
 
-export function initializeWorkflow(board: Board, text: string, source?: string, force = false, now = Date.now()): WorkflowStatus {
+export interface InitWorkflowOptions {
+  source?: string;
+  force?: boolean;
+  now?: number;
+  /** Kanban card the workflow drives; stage transitions then move this card. */
+  taskId?: string;
+}
+
+export function initializeWorkflow(board: Board, text: string, options: InitWorkflowOptions = {}): WorkflowStatus {
+  const { source, force = false, now = Date.now(), taskId } = options;
   const stages = parseWorkflow(text);
+  if (taskId && !board.tasks.some((task) => task.id === taskId && !task.archived)) {
+    throw new WorkflowError("TASK_NOT_FOUND", `board '${board.id}' has no active task '${taskId}'`);
+  }
   return withLock(board.id, () => {
     if (loadWorkflow(board.id) && !force) {
       throw new WorkflowError("WORKFLOW_EXISTS", "this workspace already has a workflow; pass --force to replace it");
@@ -158,6 +174,7 @@ export function initializeWorkflow(board: Board, text: string, source?: string, 
       board_id: board.id,
       workspace_id: board.workspace_id,
       ...(source ? { source } : {}),
+      ...(taskId ? { task_id: taskId } : {}),
       initialized_at: now,
       updated_at: now,
       current_stage: stages[0].name,
@@ -176,6 +193,7 @@ export function workflowStatus(workflow: WorkflowTask): WorkflowStatus {
   return {
     board_id: workflow.board_id,
     workspace_id: workflow.workspace_id,
+    ...(workflow.task_id ? { task_id: workflow.task_id } : {}),
     current_stage: workflow.current_stage,
     terminal: stage.terminal,
     stage,
@@ -189,17 +207,36 @@ export function getWorkflowStatus(boardId: string): WorkflowStatus {
   return workflowStatus(requireWorkflow(boardId));
 }
 
+/**
+ * Replay guard shared by every mutating command. Returns the original result
+ * when the same ID repeats the same input, and rejects an ID reused for
+ * different input — so a retrying supervisor can never double-apply a command.
+ */
+function replayed(workflow: WorkflowTask, requestId: string | undefined, input: RequestRecord["input"]): WorkflowStatus | null {
+  if (!requestId) return null;
+  const previous = workflow.requests.find((request) => request.request_id === requestId);
+  if (!previous) return null;
+  // Records written before runs became idempotent carry no `op`; they are all
+  // transitions. Both sides are rebuilt field by field so key order — and thus
+  // the JSON comparison — is stable regardless of how each was stored.
+  const normalize = (value: RequestRecord["input"]) =>
+    JSON.stringify({ op: value.op ?? "transition", state: value.state, role: value.role, result: value.result });
+  if (normalize(previous.input) !== normalize(input)) {
+    throw new WorkflowError("REQUEST_CONFLICT", `request ID '${requestId}' was already used with different input`);
+  }
+  return previous.result;
+}
+
+function record(workflow: WorkflowTask, requestId: string | undefined, input: RequestRecord["input"], result: WorkflowStatus): void {
+  if (requestId) workflow.requests.push({ request_id: requestId, input, result });
+}
+
 export function transitionWorkflow(boardId: string, state: string, requestId: string, now = Date.now()): WorkflowStatus {
   if (!state.trim() || !requestId.trim()) throw new WorkflowError("INVALID_ARGUMENT", "state and request ID must be non-empty");
   return withLock(boardId, () => {
     const workflow = requireWorkflow(boardId);
-    const previous = workflow.requests.find((request) => request.request_id === requestId);
-    if (previous) {
-      if (previous.input.state !== state) {
-        throw new WorkflowError("REQUEST_CONFLICT", `request ID '${requestId}' was already used with different input`);
-      }
-      return previous.result;
-    }
+    const previous = replayed(workflow, requestId, { op: "transition", state });
+    if (previous) return previous;
     const current = workflow.stages.find((stage) => stage.name === workflow.current_stage);
     if (!current || !current.transitions.includes(state)) {
       throw new WorkflowError("INVALID_TRANSITION", `cannot transition from '${workflow.current_stage}' to '${state}'`);
@@ -207,37 +244,51 @@ export function transitionWorkflow(boardId: string, state: string, requestId: st
     workflow.current_stage = state;
     workflow.updated_at = now;
     const result = workflowStatus(workflow);
-    workflow.requests.push({ request_id: requestId, input: { state }, result });
+    record(workflow, requestId, { op: "transition", state }, result);
     writeAtomic(workflowPath(boardId), workflow);
     return result;
   });
 }
 
-export function startRoleRun(boardId: string, role: string, now = Date.now()): WorkflowStatus {
+export function startRoleRun(boardId: string, role: string, now = Date.now(), requestId?: string): WorkflowStatus {
   if (!role.trim()) throw new WorkflowError("INVALID_ARGUMENT", "role must be non-empty");
   return withLock(boardId, () => {
     const workflow = requireWorkflow(boardId);
+    const previous = replayed(workflow, requestId, { op: "run.start", role });
+    if (previous) return previous;
     const run: RoleRun = { id: newId("run"), role, started_at: now, status: "running" };
     workflow.runs.push(run);
     workflow.updated_at = now;
+    const status = workflowStatus(workflow);
+    record(workflow, requestId, { op: "run.start", role }, status);
     writeAtomic(workflowPath(boardId), workflow);
-    return workflowStatus(workflow);
+    return status;
   });
 }
 
-export function finishRoleRun(boardId: string, role: string, result: RoleRunResult, now = Date.now()): WorkflowStatus {
+export function finishRoleRun(boardId: string, role: string, result: RoleRunResult, now = Date.now(), requestId?: string): WorkflowStatus {
   if (!role.trim()) throw new WorkflowError("INVALID_ARGUMENT", "role must be non-empty");
   return withLock(boardId, () => {
     const workflow = requireWorkflow(boardId);
+    const previous = replayed(workflow, requestId, { op: "run.finish", role, result });
+    if (previous) return previous;
     const run = [...workflow.runs].reverse().find((candidate) => candidate.role === role && candidate.status === "running");
     if (!run) throw new WorkflowError("RUN_NOT_FOUND", `role '${role}' has no running run`);
     run.status = "finished";
     run.result = result;
     run.ended_at = now;
     workflow.updated_at = now;
+    const status = workflowStatus(workflow);
+    record(workflow, requestId, { op: "run.finish", role, result }, status);
     writeAtomic(workflowPath(boardId), workflow);
-    return workflowStatus(workflow);
+    return status;
   });
+}
+
+export function boardById(boardId: string): Board {
+  const board = loadBoard(boardId);
+  if (!board) throw new WorkflowError("BOARD_NOT_FOUND", `no board '${boardId}'`);
+  return board;
 }
 
 export function boardForWorkspace(workspaceId: string): Board {

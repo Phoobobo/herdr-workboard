@@ -35,7 +35,7 @@ herdr plugin link /path/to/herdr-workboard
 ```
 
 Plugin installation does **not** place a global executable on `PATH`. To install
-the optional workflow CLI from a checkout (including the same checkout used by
+the machine CLI from a checkout (including the same checkout used by
 `plugin link`):
 
 ```bash
@@ -161,12 +161,48 @@ If an idle pane is left over in a busy tab (e.g. after its session moved
 elsewhere), the next arrival closes it and takes its spot instead of growing
 the pane count.
 
-## Workspace workflow CLI
+## Machine CLI
+
+Every board primitive the TUI offers is also one `--json` command, so an agent
+or a supervisor process can drive a board with no terminal attached.
+
+Boards and cards:
+
+```bash
+herdr-workboard board new --name "auth rework" --cwd ~/src/api --json
+herdr-workboard board list --json
+herdr-workboard board show --json
+
+herdr-workboard task add "port the session store" --body "keep the old keys" --state todo --json
+herdr-workboard task list --state doing --json
+herdr-workboard task move t3 --state review --json
+herdr-workboard task start t3 --json          # --shell for a bare shell
+herdr-workboard task focus t3 --json
+herdr-workboard task archive t3 --close-pane --json
+```
+
+`board new` builds the workspace and returns its ids synchronously — callers
+never poll `workspace list` to discover what was created. Tasks are addressable
+by id (`t3`) or by card number (`#3`). Everything after `--` is a verbatim agent
+argv: `task add "fix it" -- codex --model o3` sets that card's agent.
+
+Archived cards stay readable through `task show` and `task list --all` but
+refuse `move`, `update`, `start`, and `archive`.
+
+Unlike the TUI — where dragging a card into the working column *is* the gesture
+for starting work — CLI moves never spawn an agent as a side effect. Ask for a
+session explicitly with `task start`.
+
+### Board selection
+
+`--board <id>` wins, then `--workspace <id>`, then the invoking pane's own
+workspace (`HERDR_*` env), then the focused workspace over the socket. Callers
+running inside a board pane pass no ids at all; `board list` and `board new`
+need no board in scope.
+
+### Workspace workflow
 
 A board workspace may also own one top-level, machine-driven workflow task.
-The CLI resolves the current workspace from Herdr's pane environment (or the
-focused workspace through the Herdr socket), so callers never pass board,
-workspace, or task IDs.
 
 Initialize it from YAML:
 
@@ -182,6 +218,7 @@ stages:
     retry_message: Revise the plan
     retry_to: plan
     output: implementation.md
+    state: doing        # column this stage lives in; defaults to the stage name
     terminal: false
   complete:
     agent: verifier
@@ -190,10 +227,11 @@ stages:
 ```
 
 ```bash
-herdr-workboard workflow init ./workflow.yaml --json
+herdr-workboard workflow init ./workflow.yaml --task t3 --json
+herdr-workboard workflow show --json
 herdr-workboard status --json
-herdr-workboard run start implementer --json
-herdr-workboard run finish implementer --result passed --json
+herdr-workboard run start implementer --request-id run-001 --json
+herdr-workboard run finish implementer --result passed --request-id fin-001 --json
 herdr-workboard transition implement --request-id dispatch-001 --json
 ```
 
@@ -215,8 +253,23 @@ reusing the ID for another state is a conflict.
 Role runs are independent execution records. `run start` records role and
 start time; `run finish` records end time and `passed`, `failed`, or `blocked`.
 `status` exposes all runs plus currently running runs. The TUI status row shows
-the current workflow stage and the latest status for each role. Workflow
-transitions do not move Kanban cards or Herdr panes.
+the current workflow stage and the latest status for each role.
+
+### Stages drive cards
+
+Bind the workflow to a card with `workflow init --task <id>`, and every
+transition moves that card into the stage's column: the stage's explicit
+`state:`, else a column whose name matches the stage. A stage matching neither
+owns no column and leaves the card where it is. Each transition response
+carries a `card` object (`{task_id, state, moved}`) reporting what happened.
+
+Card sync runs on replays too, and moving a card already in its target column
+is a no-op, so a retrying supervisor converges instead of drifting. Without
+`--task`, the workflow is pure state and touches no cards.
+
+`--request-id` is an idempotency key on `transition`, `run start`, and
+`run finish` alike: replaying an ID returns the original result, and reusing
+one for different input is a `REQUEST_CONFLICT`.
 
 ## Task states
 
@@ -353,7 +406,8 @@ herdr-plugin.toml   plugin manifest (actions, pane entrypoint)
 src/herdr.ts        socket client (one request per connection + event stream)
 src/store.ts        board persistence (atomic JSON writes)
 src/workflow.ts     workflow validation, snapshots, transitions, and role runs
-src/cli.ts          workspace-scoped machine CLI
+src/tasks.ts        socket-free task primitives shared by the TUI and the CLI
+src/cli.ts          the machine CLI (boards, tasks, sessions, workflow)
 src/boardctl.ts     kanban verbs -> herdr socket calls
 src/ui.ts           cell-buffer renderer (CJK-safe) + key/mouse parser
 src/board.ts        the kanban TUI

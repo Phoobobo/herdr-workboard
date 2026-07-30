@@ -290,6 +290,23 @@ export function stateForStatus(board: Board, status: AgentStatus): BoardState | 
   return null;
 }
 
+/**
+ * The column a workflow stage lives in: the stage's explicit `state:`, else a
+ * column named like the stage. Returns null when neither matches, which means
+ * "this stage doesn't own a column" — the card simply stays where it is.
+ */
+export function resolveStageState(board: Board, stage: { name: string; state?: string }): BoardState | null {
+  const byName = (want: string) => board.states.find((s) => s.name.toLowerCase() === want.toLowerCase()) ?? null;
+  if (stage.state) {
+    const explicit = byName(stage.state);
+    // An explicit mapping naming a column that doesn't exist is a workflow
+    // authoring bug, not a silent no-op.
+    if (!explicit) throw new Error(`stage '${stage.name}' maps to unknown column '${stage.state}'`);
+    return explicit;
+  }
+  return byName(stage.name);
+}
+
 export function paneLabel(task: Task): string {
   return `#${task.seq} ${task.title}`.slice(0, 60);
 }
@@ -377,7 +394,19 @@ export async function focusTask(task: Task): Promise<void> {
  * move retried once. `refocusPaneId` (the board's own pane) restores focus
  * afterwards, since unzooming steals it.
  */
-export async function moveTaskToState(board: Board, task: Task, targetStateId: string, refocusPaneId?: string, followFocus = false): Promise<void> {
+export async function moveTaskToState(
+  board: Board,
+  task: Task,
+  targetStateId: string,
+  refocusPaneId?: string,
+  followFocus = false,
+  /**
+   * Whether landing a session-less card in the working column starts its agent.
+   * True for the TUI, where the drag IS the "start work" gesture; false for the
+   * CLI, where a caller that wants a session asks for one with `task start`.
+   */
+  spawnOnArrival = true,
+): Promise<void> {
   const target = board.states.find((s) => s.id === targetStateId);
   if (!target) throw new Error("unknown target state");
   if (task.state_id === targetStateId) return;
@@ -442,7 +471,7 @@ export async function moveTaskToState(board: Board, task: Task, targetStateId: s
 
   // Moving a session-less card into the working column IS starting work on
   // it: spawn its preferred agent there, same as pressing s would.
-  if (hadNoSession && stateForStatus(board, "working")?.id === targetStateId) {
+  if (spawnOnArrival && hadNoSession && stateForStatus(board, "working")?.id === targetStateId) {
     await startSession(board, task, "agent");
   }
 }
